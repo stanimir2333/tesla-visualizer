@@ -111,10 +111,36 @@
 <script>
 (() => {
 const $ = id => document.getElementById(id);
-const cv = $('cv'), ctx = cv.getContext('2d');
+const cv = $('cv'), ctx = cv.getContext('2d', { alpha: false });
 let W=0,H=0,DPR=1;
-function resize(){ DPR=Math.min(2,window.devicePixelRatio||1); W=innerWidth; H=innerHeight; cv.width=W*DPR; cv.height=H*DPR; ctx.setTransform(DPR,0,0,DPR,0,0); }
-addEventListener('resize',resize); resize();
+// ---- adaptive quality: 0=full, 1=balanced, 2=perf, 3=ultra (auto-tuned for mobile FPS) ----
+const isCoarse = (matchMedia && matchMedia('(pointer:coarse)').matches) || innerWidth < 620;
+const Q = {
+  level: isCoarse ? 1 : 0,
+  dprCap: [2, 1.5, 1.2, 1],
+  ema: 16, lastQChange: 0,
+};
+function targetDPR(){
+  const cap = Q.dprCap[Q.level] ?? 1;
+  return Math.min(cap, window.devicePixelRatio || 1);
+}
+let bgCache = null; // pre-rendered floor grid, rebuilt on resize / quality change
+function resize(){
+  DPR = targetDPR(); W = innerWidth; H = innerHeight;
+  cv.width = Math.max(1, Math.round(W*DPR)); cv.height = Math.max(1, Math.round(H*DPR));
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  bgCache = null;
+}
+let _rszT = 0;
+function resizeSoon(){ clearTimeout(_rszT); _rszT = setTimeout(resize, 120); }
+addEventListener('resize', resizeSoon); resize();
+function adaptQuality(dtMs){
+  Q.ema = Q.ema*0.92 + Math.min(dtMs,100)*0.08;
+  const now = performance.now();
+  if(now - Q.lastQChange < 1500) return;
+  if(Q.ema > 24 && Q.level < 3){ Q.level++; Q.lastQChange = now; resize(); }
+  else if(Q.ema < 12.5 && Q.level > (isCoarse ? 1 : 0)){ Q.level--; Q.lastQChange = now; resize(); }
+}
 
 // ---------- helpers ----------
 const NOTE_NAMES=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
@@ -164,18 +190,29 @@ function makeCoilVoice(){
   o1.connect(sh); o2.connect(g2); g2.connect(sh); sh.connect(lp); lp.connect(vca); vca.connect(master); vca.connect(delaySend);
   ns.connect(bp); bp.connect(ng); ng.connect(master);
   o1.start(); o2.start(); ns.start();
-  return {o1,o2,lp,vca,ng,energy:0,target:0,freq:0,midi:-1};
+  return {o1,o2,sh,lp,vca,ns,bp,ng,energy:0,target:0,freq:0,midi:-1,_lastGain:-1};
+}
+function killVoice(v){
+  try{
+    const t = AC ? AC.currentTime : 0;
+    try{ v.vca.gain.cancelScheduledValues(t); v.ng.gain.cancelScheduledValues(t); }catch(e){}
+    v.o1.stop(t+0.05); v.o2.stop(t+0.05); v.ns.stop(t+0.05);
+  }catch(e){}
+  try{ v.o1.disconnect(); v.o2.disconnect(); v.sh.disconnect(); v.lp.disconnect(); v.vca.disconnect(); v.ns.disconnect(); v.bp.disconnect(); v.ng.disconnect(); }catch(e){}
 }
 function ensureCoils(n){
   ensureAudio(); if(!SHAPER_CURVE) buildShared();
   while(coils.length<n) coils.push(makeCoilVoice());
-  // extra voices -> silence (keep running)
-  coils.forEach((c,i)=>{ if(i>=n){c.target=0; try{c.vca.gain.setTargetAtTime(0,AC.currentTime,0.03);c.ng.gain.setTargetAtTime(0,AC.currentTime,0.03);}catch(e){}} });
+  // FIX (memory/CPU leak): fully stop + disconnect trimmed voices instead of
+  // leaving their oscillators + noise loops running silently forever.
+  while(coils.length>n){ const v=coils.pop(); silenceCoil(v, AC.currentTime); killVoice(v); }
+  // prune persistent arc state for removed coils
+  while(arcStates.length>n){ const s=arcStates.pop(); if(s){ s.bolts.length=0; s.chanByMidi={}; } }
   return coils.slice(0,n);
 }
 function setCoilNote(v, midi, gain, t){
   const f=midiFreq(midi);
-  v.midi=midi; v.freq=f;
+  v.midi=midi; v.freq=f; v._lastGain=gain;
   v.o1.frequency.setTargetAtTime(f,t,0.008);
   v.o2.frequency.setTargetAtTime(f*1.003+1.5,t,0.008);
   v.lp.frequency.setTargetAtTime(Math.min(9000,1200+f*1.6),t,0.03);
@@ -184,7 +221,7 @@ function setCoilNote(v, midi, gain, t){
   v.vca.gain.setTargetAtTime(a,t,0.006); // fast attack =劈 crack
   v.ng.gain.setTargetAtTime(a*0.35,t,0.01);
 }
-function silenceCoil(v,t){ v.midi=-1; v.target=0; v.vca.gain.setTargetAtTime(0,t,0.045); v.ng.gain.setTargetAtTime(0,t,0.03); }
+function silenceCoil(v,t){ if(v.midi===-1 && v._lastGain===0) return; v.midi=-1; v._lastGain=0; v.target=0; v.vca.gain.setTargetAtTime(0,t,0.045); v.ng.gain.setTargetAtTime(0,t,0.03); }
 
 // ---------- FFT + transcription ----------
 function fftRealImag(re,im){
@@ -210,21 +247,31 @@ function magAt(mags, sr, N, f){
 
 async function transcribe(buffer, numCoils, sens, onProg){
   const sr=buffer.sampleRate;
+  // FIX (memory): downmix in place into ch0 instead of allocating a second
+  // full-length mono copy (saves ~tens of MB on long songs, avoids mobile OOM).
   const ch0=buffer.getChannelData(0);
-  const ch1=buffer.numberOfChannels>1?buffer.getChannelData(1):null;
-  const len=ch0.length;
-  const mono=new Float32Array(len);
-  for(let i=0;i<len;i++) mono[i]=ch1?(ch0[i]+ch1[i])*0.5:ch0[i];
+  if(buffer.numberOfChannels>1){
+    const ch1=buffer.getChannelData(1);
+    const len=Math.min(ch0.length, ch1.length);
+    for(let i=0;i<len;i++) ch0[i]=(ch0[i]+ch1[i])*0.5;
+  }
+  const mono=ch0;
+  const len=mono.length;
 
   const N=4096, HOP=2048;
   const frames=Math.max(1,Math.floor((len-N)/HOP));
   const re=new Float32Array(N), im=new Float32Array(N);
   const hann=new Float32Array(N);
   for(let i=0;i<N;i++) hann[i]=0.5*(1-Math.cos(2*Math.PI*i/(N-1)));
+  const half=N/2, mags=new Float32Array(half); // reused every frame (was a fresh alloc per frame)
   const out=new Array(frames);
   const LOW_MIDI=26, HIGH_MIDI=91; // E1 .. G6 — coil-friendly range
   const lastAssigned=new Array(numCoils).fill(-1);
   const thresh = 0.28 - (sens/100)*0.20; // sens 20..100 -> thresh .24..08
+  // reused pitch-candidate objects: avoids ~66 object allocs per frame
+  const cands=[];
+  for(let m=LOW_MIDI;m<=HIGH_MIDI;m++) cands.push({m,s:0});
+  const slots=new Array(numCoils), used=new Array(numCoils);
 
   for(let fIdx=0;fIdx<frames;fIdx++){
     const off=fIdx*HOP;
@@ -234,21 +281,17 @@ async function transcribe(buffer, numCoils, sens, onProg){
     if(rms<0.012){ out[fIdx]={t:off/sr,notes:[]}; }
     else{
       fftRealImag(re,im);
-      const half=N/2, mags=new Float32Array(half);
       for(let k=0;k<half;k++) mags[k]=Math.sqrt(re[k]*re[k]+im[k]*im[k])/(N/2);
       // harmonic-weighted pitch scores
-      const cands=[];
-      for(let m=LOW_MIDI;m<=HIGH_MIDI;m++){
-        const f0=midiFreq(m);
+      for(const c of cands){
+        const f0=midiFreq(c.m);
         let s=0,w=0;
         for(let h=1;h<=5;h++){
           const fh=f0*h; if(fh>sr/2-50) break;
           const hw=1/Math.pow(h,0.9);
           s+=magAt(mags,sr,N,fh)*hw; w+=hw;
         }
-        s/=w;
-        // slight emphasis to mid where coils sing + penalize extreme lows (muddy)
-        cands.push({m,s});
+        c.s=s/w;
       }
       let mx=1e-9; for(const c of cands) mx=Math.max(mx,c.s);
       cands.sort((a,b)=>b.s-a.s);
@@ -260,8 +303,7 @@ async function transcribe(buffer, numCoils, sens, onProg){
         picked.push(c);
       }
       // voice-continuity assignment: keep coils from jumping
-      const slots=new Array(numCoils).fill(null);
-      const used=new Array(numCoils).fill(false);
+      for(let c=0;c<numCoils;c++){ slots[c]=null; used[c]=false; }
       // order picked by score, assign nearest free coil
       const order=[...picked].sort((a,b)=>b.s-a.s);
       for(const p of order){
@@ -274,7 +316,7 @@ async function transcribe(buffer, numCoils, sens, onProg){
       for(let c=0;c<numCoils;c++) if(slots[c]) notes.push({coil:c,midi:slots[c].midi,gain:slots[c].gain});
       out[fIdx]={t:off/sr,notes};
     }
-    if(fIdx%150===0){ onProg&&onProg(fIdx/frames); await new Promise(r=>setTimeout(r,0)); }
+    if(fIdx%60===0){ onProg&&onProg(fIdx/frames); await new Promise(r=>setTimeout(r,0)); }
   }
   // light smoothing: kill 1-frame blips (flicker -> buzz)
   for(let c=0;c<numCoils;c++){
@@ -307,6 +349,7 @@ async function loadFile(file){
     const buf=await AC.decodeAudioData(ab.slice(0));
     const n=parseInt($('coilCount').value,10), sens=parseInt($('sens').value,10);
     setStatus('Transcribing to '+n+' coils (FFT pitch tracking) …');
+    song=null; curVoices=[]; particles.length=0; // release previous transcription before the peak-memory pass
     song=await transcribe(buf,n,sens,p=>setProg(p*0.95));
     song.name=file.name;
     setProg(null);
@@ -368,9 +411,15 @@ function schedule(){
   if(fr) for(const nn of fr.notes) if(nn.coil<n) want[nn.coil]=nn;
   for(let c=0;c<n;c++){
     const v=curVoices[c], w=want[c];
-    // smooth visual energy
-    if(w) setCoilNote(v,w.midi,w.gain,now);
-    else silenceCoil(v,now);
+    // FIX: only push automation events on real changes — re-firing
+    // setTargetAtTime every 40 ms for a held note piles up automation
+    // events and burns CPU on mobile.
+    if(w){
+      const dg=Math.abs((v._lastGain??-1)-w.gain);
+      if(v.midi!==w.midi || dg>0.12) setCoilNote(v,w.midi,w.gain,now);
+      else v.target=Math.min(1,w.gain)*0.5*(curVoices.length>4?Math.sqrt(4/curVoices.length):1);
+    }
+    else if(v.midi!==-1) silenceCoil(v,now);
   }
   updateTime();
   // note pill
@@ -393,8 +442,7 @@ function stop(ended){
   updateTime(); if(ended) setStatus('Finished — press Play to run it again.');
 }
 
-// ---------- visuals ----------
-const isCoarse=matchMedia&&matchMedia('(pointer:coarse)').matches;
+// ---------- visuals (isCoarse + Q defined near canvas setup) ----------
 function horizonY(){ return H*(W<620?0.60:0.78); } // keep coils above bottom sheet on phones
 function groundY(){ return horizonY(); }
 function coilScale(n){
@@ -463,7 +511,7 @@ function channelFor(st,midi,coilIdx){
 }
 function strokeBolt(pts,color,width,glow){
   ctx.save(); ctx.strokeStyle=color; ctx.lineWidth=width; ctx.lineJoin='round'; ctx.lineCap='round';
-  ctx.shadowColor=color; ctx.shadowBlur=glow;
+  if(Q.level===0 && glow>0){ ctx.shadowColor=color; ctx.shadowBlur=glow; } // shadowBlur is a mobile FPS killer — full quality only
   ctx.beginPath(); ctx.moveTo(pts[0][0],pts[0][1]);
   for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i][0],pts[i][1]);
   ctx.stroke(); ctx.restore();
@@ -494,13 +542,16 @@ function drawArc(x,y,energy,freq,arcScale,coilIdx,time){
       st.midi=curMidi;
       const ch=channelFor(st,curMidi,coilIdx||0);
       st.tint={outer:ch.outer,core:'rgba(220,255,255,0.95)'};
-      const nBolts=1+Math.round(Math.min(1,st.energySm)*2); // 1–3 stable leaders
+      const eMax = Q.level>=2 ? 1 : 2; // fewer simultaneous leaders on mobile
+      const nBolts=1+Math.round(Math.min(1,st.energySm)*eMax); // 1–3 stable leaders
       st.bolts=[];
+      const segs = Q.level>=2 ? 6+Math.floor(Math.random()*2) : 9+Math.floor(Math.random()*3);
+      const maxParticles = [900, 500, 300, 180][Q.level] ?? 300;
       for(let b=0;b<nBolts;b++){
         const ang=ch.baseAng+(b-(nBolts-1)/2)*0.28+(Math.random()-0.5)*0.12;
-        const tree=boltPath(x,y,st.lenSm*ch.lenMul*(0.9+Math.random()*0.2),ang,9+Math.floor(Math.random()*3));
+        const tree=boltPath(x,y,st.lenSm*ch.lenMul*(0.9+Math.random()*0.2),ang,segs);
         st.bolts.push(tree);
-        if(noteChanged){
+        if(noteChanged && particles.length<maxParticles){
           const tip=tree.main[tree.main.length-1];
           for(let k=0;k<2;k++) particles.push({x:tip[0],y:tip[1],vx:(Math.random()-0.5)*160,vy:(Math.random()-0.5)*160-40,life:0.35+Math.random()*0.35,t:0});
         }
@@ -522,71 +573,117 @@ function drawArc(x,y,energy,freq,arcScale,coilIdx,time){
     ctx.restore();
   }
 }
+// cached ground-glow sprite: one radial gradient total, blitted per coil
+let _glowSprite = null;
+function glowSprite(){
+  if(_glowSprite) return _glowSprite;
+  const c=document.createElement('canvas'); c.width=256; c.height=112;
+  const g=c.getContext('2d');
+  const rg=g.createRadialGradient(128,100,8,128,100,126);
+  rg.addColorStop(0,'rgba(125,249,255,0.55)'); rg.addColorStop(1,'rgba(0,0,0,0)');
+  g.fillStyle=rg; g.fillRect(0,0,256,112);
+  _glowSprite=c; return c;
+}
 function drawCoil(x,baseY,s,voice,arcScale,time,coilIdx){
   const e = voice?Math.min(1,(voice.vca?voice.vca.gain.value*2.2:0)+ (voice.target||0)*0.35):0;
-  const energy = drawCoil._sm(drawCoil._k=(drawCoil._k||{}), (coilIdx!=null?('c'+coilIdx):Math.round(x)), e);
-  // ground glow
-  const g=ctx.createRadialGradient(x,baseY,10,x,baseY,190*s);
-  g.addColorStop(0,`rgba(125,249,255,${0.10+energy*0.35})`); g.addColorStop(1,'rgba(0,0,0,0)');
-  ctx.fillStyle=g; ctx.fillRect(x-200*s,baseY-140*s,400*s,170*s);
+  const energy = drawCoil._sm(drawCoil._k=(drawCoil._k||{}), (coilIdx!=null?('c'+coilIdx):'x'), e);
+  // ground glow (cached sprite — was createRadialGradient per coil per frame)
+  if(energy>0.02){
+    ctx.save(); ctx.globalAlpha=Math.min(1,0.25+energy*0.75);
+    const gw=400*s, gh=170*s;
+    ctx.drawImage(glowSprite(), x-gw/2, baseY-140*s, gw, gh);
+    ctx.restore();
+  }
   // base box
-  ctx.save();
   ctx.fillStyle='#101a30'; ctx.strokeStyle='#2c4472'; ctx.lineWidth=2;
   const bw=150*s,bh=54*s;
   roundRect(x-bw/2,baseY-bh,bw,bh,8); ctx.fill(); ctx.stroke();
-  ctx.fillStyle='#0a1226'; ctx.font=`${11*s}px monospace`; ctx.textAlign='center';
   ctx.fillStyle= energy>0.1?'#7df9ff':'#42567e';
   ctx.fillText(voice&&voice.midi>0?('♪ '+midiName(voice.midi)+'  '+Math.round(voice.freq)+'Hz'):'— standby —', x, baseY-bh/2+4);
   // primary (few thick turns)
   ctx.strokeStyle='#3b5a9a'; ctx.lineWidth=4*s;
-  for(let i=0;i<4;i++){ ctx.beginPath(); ctx.ellipse(x,baseY-bh-8-i*9*s, (52-i*7)*s, 10*s,0,0,Math.PI*2); ctx.stroke(); }
-  // secondary tower
+  ctx.beginPath();
+  for(let i=0;i<4;i++){ ctx.moveTo(x+(52-i*7)*s,baseY-bh-8-i*9*s); ctx.ellipse(x,baseY-bh-8-i*9*s, (52-i*7)*s, 10*s,0,0,Math.PI*2); }
+  ctx.stroke();
+  // secondary tower: solid fill (was a fresh linear gradient per coil per frame)
   const tw=54*s, th=190*s, ty=baseY-bh-36*s-th;
-  const grad=ctx.createLinearGradient(x-tw/2,0,x+tw/2,0);
-  grad.addColorStop(0,'#1a2745'); grad.addColorStop(0.5,'#4a6db3'); grad.addColorStop(1,'#141f3a');
-  ctx.fillStyle=grad; roundRect(x-tw/2,ty,tw,th,10); ctx.fill();
+  ctx.fillStyle='#24365e'; roundRect(x-tw/2,ty,tw,th,10); ctx.fill();
+  ctx.fillStyle='#4a6db355'; ctx.fillRect(x-tw/2+4*s,ty+4,6*s,Math.max(1,th-8));
+  // windings: single batched stroke, sparser on mobile (was ~36 strokes/coil/frame)
   ctx.strokeStyle='#7df9ff55'; ctx.lineWidth=1;
-  for(let y=ty+6;y<ty+th-4;y+=5){ ctx.beginPath(); ctx.moveTo(x-tw/2+3,y); ctx.lineTo(x+tw/2-3,y); ctx.stroke(); }
-  // toroid
-  ctx.save();
-  ctx.shadowColor=`rgba(125,249,255,${0.3+energy*0.7})`; ctx.shadowBlur=20+energy*46;
-  ctx.fillStyle='#0d152b'; ctx.strokeStyle='#7df9ff'; ctx.lineWidth=2.4;
-  ctx.beginPath(); ctx.ellipse(x,ty-8*s,66*s,20*s,0,0,Math.PI*2); ctx.fill(); ctx.stroke();
-  ctx.restore();
+  ctx.beginPath();
+  const stride = Q.level>=1 ? 10 : 5;
+  for(let y=ty+6;y<ty+th-4;y+=stride){ ctx.moveTo(x-tw/2+3,y); ctx.lineTo(x+tw/2-3,y); }
+  ctx.stroke();
+  // toroid (shadowBlur only on full quality — very slow on mobile GPUs)
+  if(Q.level===0){
+    ctx.save();
+    ctx.shadowColor=`rgba(125,249,255,${0.3+energy*0.7})`; ctx.shadowBlur=20+energy*46;
+    ctx.fillStyle='#0d152b'; ctx.strokeStyle='#7df9ff'; ctx.lineWidth=2.4;
+    ctx.beginPath(); ctx.ellipse(x,ty-8*s,66*s,20*s,0,0,Math.PI*2); ctx.fill(); ctx.stroke();
+    ctx.restore();
+  } else {
+    ctx.fillStyle='#0d152b'; ctx.strokeStyle='#7df9ff'; ctx.lineWidth=2.4;
+    ctx.beginPath(); ctx.ellipse(x,ty-8*s,66*s,20*s,0,0,Math.PI*2); ctx.fill(); ctx.stroke();
+    if(energy>0.05){ ctx.fillStyle=`rgba(207,255,255,${Math.min(0.85,energy)})`; ctx.beginPath(); ctx.ellipse(x,ty-8*s,66*s,20*s,0,0,Math.PI*2); ctx.fill(); }
+  }
   // breakout point
   const tipX=x, tipY=ty-28*s;
   ctx.fillStyle='#dffcff'; ctx.beginPath(); ctx.arc(tipX,tipY,2.4,0,Math.PI*2); ctx.fill();
   // arcs — persistent channel per coil (see drawArc)
   if(voice&&voice.midi>0) drawArc(tipX,tipY-4,energy,voice.freq||440,arcScale,coilIdx,time);
-  // corona flicker light on toroid
-  if(energy>0.05){ ctx.save(); ctx.globalAlpha=Math.min(1,energy)*(0.5+Math.random()*0.5); ctx.fillStyle='#cfffff'; ctx.beginPath(); ctx.ellipse(x,ty-8*s,66*s,20*s,0,0,Math.PI*2); ctx.fill(); ctx.restore(); }
+  // corona flicker light on toroid (no shadow on mobile)
+  else if(energy>0.05 && Q.level===0){ ctx.save(); ctx.globalAlpha=Math.min(1,energy)*(0.5+Math.random()*0.5); ctx.fillStyle='#cfffff'; ctx.beginPath(); ctx.ellipse(x,ty-8*s,66*s,20*s,0,0,Math.PI*2); ctx.fill(); ctx.restore(); }
 }
-drawCoil._sm=function(store,key,e){ const k='e'+key; const prev=(k in store)?store[k]:e; const v=prev+(e-prev)*0.18; store[k]=v; return v; };
-function roundRect(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+drawCoil._sm=function(store,key,e){ const k='e'+key; const prev=(k in store)?store[k]:e; const v=prev+(e-prev)*0.18; store[k]=v; if(store._n==null)store._n=0; if(++store._n>4000){ // bound leak from resize-varying keys
+  for(const kk in store) if(kk[0]==='e'&&kk!=='e'+key) delete store[kk]; store._n=0; } return v; };
+function roundRect(x,y,w,h,r){ if(ctx.roundRect){ ctx.beginPath(); ctx.roundRect(x,y,w,h,r); return; } ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
 
-function drawBG(t){
-  // floor grid
-  ctx.save(); ctx.strokeStyle='#14244a66'; ctx.lineWidth=1;
+function renderBGCache(){
+  bgCache=document.createElement('canvas');
+  bgCache.width=Math.max(1,Math.round(W*DPR)); bgCache.height=Math.max(1,Math.round(H*DPR));
+  const g=bgCache.getContext('2d'); g.setTransform(DPR,0,0,DPR,0,0);
+  // sky base (matches CSS radial backdrop, opaque since main ctx is alpha:false)
+  const sky=g.createRadialGradient(W/2,H*0.1,40,W/2,H*0.1,Math.max(W,H)*0.75);
+  sky.addColorStop(0,'#0d1733'); sky.addColorStop(0.6,'#04060e'); sky.addColorStop(1,'#000000');
+  g.fillStyle=sky; g.fillRect(0,0,W,H);
   const horizon=horizonY();
-  ctx.fillStyle='#02040a'; ctx.fillRect(0,horizon,W,H-horizon);
-  for(let i=0;i<24;i++){ const y=horizon+Math.pow(i/24,1.8)*(H-horizon); ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
-  for(let i=-14;i<=14;i++){ ctx.beginPath(); ctx.moveTo(W/2+i*70,horizon); ctx.lineTo(W/2+i*260,H); ctx.stroke(); }
-  ctx.strokeStyle='#1e3a6e'; ctx.beginPath(); ctx.moveTo(0,horizon); ctx.lineTo(W,horizon); ctx.stroke();
-  ctx.restore();
-  // floating dust
+  g.fillStyle='#02040a'; g.fillRect(0,horizon,W,H-horizon);
+  g.strokeStyle='#14244a66'; g.lineWidth=1;
+  g.beginPath();
+  for(let i=0;i<24;i++){ const y=horizon+Math.pow(i/24,1.8)*(H-horizon); g.moveTo(0,y); g.lineTo(W,y); }
+  g.stroke();
+  g.beginPath();
+  for(let i=-14;i<=14;i++){ g.moveTo(W/2+i*70,horizon); g.lineTo(W/2+i*260,H); }
+  g.stroke();
+  g.strokeStyle='#1e3a6e'; g.beginPath(); g.moveTo(0,horizon); g.lineTo(W,horizon); g.stroke();
+}
+function drawBG(t){
+  if(!bgCache) renderBGCache();
+  ctx.drawImage(bgCache, 0, 0, W, H); // static floor grid blit — was ~53 strokes/frame
+  // floating dust (count scales with quality; batched, no shadows)
+  const nDust = [40, 22, 14, 10][Q.level] ?? 14;
   ctx.save(); ctx.fillStyle='#7df9ff22';
-  for(let i=0;i<40;i++){ const x=(i*197.3+t*12)%W, y=(i*131.7)%(H*0.7); ctx.fillRect(x,y,1.6,1.6); }
+  ctx.beginPath();
+  for(let i=0;i<nDust;i++){ const x=(i*197.3+t*12)%W, y=(i*131.7)%(H*0.7); ctx.rect(x,y,1.6,1.6); }
+  ctx.fill();
   ctx.restore();
 }
+let _lastFrameT = 0;
 function loop(tms){
   requestAnimationFrame(loop);
   const t=tms/1000;
-  ctx.clearRect(0,0,W,H);
+  const dtMs = _lastFrameT ? (tms-_lastFrameT) : 16.7;
+  _lastFrameT = tms;
+  adaptQuality(dtMs);
+  const dt = Math.min(0.05, dtMs/1000); // clamp tab-switch spikes
   drawBG(t);
   const n=parseInt($('coilCount').value,10);
   const s=coilScale(n);
   const pos=coilPositions(n,s);
   const arcScale=parseInt($('arc').value,10)/100;
+  // font once per frame (was rebuilt per coil)
+  ctx.font=`${Math.max(9,11*s)}px monospace`; ctx.textAlign='center';
   // scaffold for stacked top row so towers don't float
   if(n>10){
     const topY=pos.slice(Math.ceil(n/2)).reduce((m,p)=>Math.min(m,p.y),Infinity);
@@ -594,7 +691,9 @@ function loop(tms){
     ctx.save(); ctx.strokeStyle='#2c4472'; ctx.lineWidth=3;
     ctx.beginPath(); ctx.moveTo(minX-90*s,topY); ctx.lineTo(maxX+90*s,topY); ctx.stroke();
     ctx.strokeStyle='#1d2c52'; ctx.lineWidth=2;
-    for(const p of pos.slice(Math.ceil(n/2))){ ctx.beginPath(); ctx.moveTo(p.x,topY); ctx.lineTo(p.x,topY+26); ctx.stroke(); }
+    ctx.beginPath();
+    for(const p of pos.slice(Math.ceil(n/2))){ ctx.moveTo(p.x,topY); ctx.lineTo(p.x,topY+26); }
+    ctx.stroke();
     ctx.restore();
   }
   // title glow pulse
@@ -602,17 +701,18 @@ function loop(tms){
     const v=(playing||curVoices[i])?curVoices[i]:null;
     drawCoil(pos[i].x,pos[i].y,s,v,arcScale,t,i);
   }
-  // particles
+  // particles (no shadowBlur — was per-particle glow, brutal on mobile)
   ctx.save();
+  ctx.fillStyle='#bffcff';
+  const maxP = [900, 500, 300, 180][Q.level] ?? 300;
   for(let i=particles.length-1;i>=0;i--){
-    const p=particles[i]; p.t+=1/60; if(p.t>p.life){particles.splice(i,1);continue;}
-    p.x+=p.vx/60; p.y+=p.vy/60; p.vy+=420/60;
-    ctx.globalAlpha=1-p.t/p.life; ctx.fillStyle='#bffcff';
-    ctx.shadowColor='#7df9ff'; ctx.shadowBlur=8;
+    const p=particles[i]; p.t+=dt; if(p.t>p.life){particles.splice(i,1);continue;}
+    p.x+=p.vx*dt; p.y+=p.vy*dt; p.vy+=420*dt;
+    ctx.globalAlpha=1-p.t/p.life;
     ctx.fillRect(p.x,p.y,2,2);
   }
   ctx.restore();
-  if(particles.length>900) particles.splice(0,particles.length-900);
+  if(particles.length>maxP) particles.splice(0,particles.length-maxP);
 }
 requestAnimationFrame(loop);
 
@@ -622,14 +722,14 @@ const sheet=$('controls'), sheetBtn=$('sheetToggle');
 if(sheetBtn) sheetBtn.addEventListener('click',()=>{
   sheet.classList.toggle('mini');
   sheetBtn.textContent=sheet.classList.contains('mini')?'— TAP TO EXPAND —':'— SWIPE / TAP TO COLLAPSE —';
-  setTimeout(resize,50);
+  setTimeout(resizeSoon,50);
 });
 // iOS/Safari: unlock audio on first touch
 const unlock=()=>{ if(AC&&AC.state==='suspended') AC.resume(); };
 document.addEventListener('touchend',unlock,{passive:true});
 document.addEventListener('touchstart',unlock,{passive:true});
-if(window.visualViewport) visualViewport.addEventListener('resize',resize);
-addEventListener('orientationchange',()=>setTimeout(resize,200));
+if(window.visualViewport) visualViewport.addEventListener('resize',resizeSoon);
+addEventListener('orientationchange',()=>setTimeout(resizeSoon,200));
 $('file').addEventListener('change',e=>{ if(e.target.files[0]){ loadFile(e.target.files[0]); if(W<620) sheet.classList.add('mini'); } });
 const drop=$('drop');
 ['dragover','dragenter'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('over');}));
