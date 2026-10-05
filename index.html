@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>Tesla Coil Visualizer — Solid State Musical Coils</title>
+<style>
+  :root{
+    --bg:#04060e; --panel:#0b1222cc; --accent:#7df9ff; --accent2:#b26bff; --accent3:#ff5ce1;
+    --text:#dfe9ff; --muted:#8a97b5;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;overflow:hidden}
+  #stage{position:fixed;inset:0}
+  canvas#cv{width:100%;height:100%;display:block;background:radial-gradient(1200px 700px at 50% 10%, #0d1733 0%, #04060e 60%, #000 100%)}
+  .ui{position:fixed;inset:0;pointer-events:none;display:flex;flex-direction:column;justify-content:space-between}
+  header{pointer-events:auto;display:flex;gap:12px;align-items:center;padding:14px 18px;background:linear-gradient(180deg, rgba(0,0,0,.65), transparent);flex-wrap:wrap}
+  .logo{font-weight:900;letter-spacing:.12em;font-size:14px}
+  .logo b{color:var(--accent);text-shadow:0 0 12px var(--accent)}
+  .pill{font-size:11px;color:var(--muted);border:1px solid #263451;background:#0a1226cc;padding:6px 10px;border-radius:999px;letter-spacing:.08em}
+  .controls{pointer-events:auto;margin:0 auto 14px;width:min(1060px,96vw);background:var(--panel);backdrop-filter:blur(14px);border:1px solid #22325a;border-radius:18px;padding:14px 14px 12px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  button,.filelabel{appearance:none;border:1px solid #2d406e;background:linear-gradient(180deg,#182847,#0e1730);color:var(--text);padding:10px 14px;border-radius:12px;font-weight:700;font-size:13px;cursor:pointer;transition:.15s}
+  button:hover,.filelabel:hover{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 0 18px #7df9ff55;transform:translateY(-1px)}
+  button.primary{background:linear-gradient(180deg,#00e5ff,#0088ff);color:#00131a;border-color:#7df9ff;text-shadow:none}
+  button:disabled{opacity:.4;cursor:not-allowed;transform:none;box-shadow:none}
+  input[type=file]{display:none}
+  input[type=range]{accent-color:var(--accent)}
+  label.ctl{font-size:12px;color:var(--muted);display:flex;gap:8px;align-items:center;border:1px solid #1d2c52;padding:8px 10px;border-radius:12px;background:#080e1e}
+  label.ctl b{color:var(--text)}
+  select{background:#080e1e;color:var(--text);border:1px solid #22325a;border-radius:8px;padding:6px}
+  #drop{border:1px dashed #35508a;border-radius:12px;padding:10px 12px;font-size:13px;color:var(--muted);flex:1;min-width:220px;text-align:center}
+  #drop.over{border-color:var(--accent);color:var(--accent);background:#7df9ff11}
+  .meta{display:flex;gap:10px;align-items:center;margin-top:10px;font-size:12px;color:var(--muted);flex-wrap:wrap}
+  #progressWrap{display:none;margin-top:10px;height:8px;background:#0a142c;border-radius:999px;overflow:hidden;border:1px solid #1d2c52}
+  #progress{height:100%;width:0%;background:linear-gradient(90deg,var(--accent),var(--accent2),var(--accent3));box-shadow:0 0 12px var(--accent)}
+  #status{font-size:12px;color:var(--accent)}
+  .transport{display:flex;gap:8px;align-items:center}
+  #time{font-variant-numeric:tabular-nums;font-size:12px;color:var(--text);min-width:110px}
+  .hint{font-size:11px;color:var(--muted);margin-top:8px;line-height:1.5}
+  .hint code{color:var(--accent)}
+  button,.filelabel{touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+  #sheetToggle{display:none}
+  /* ---------- phone UI ---------- */
+  @media(max-width:700px), (pointer:coarse){
+    header{padding:10px 12px;gap:8px}
+    .logo{font-size:12px}
+    .pill{font-size:10px;padding:5px 8px}
+    .pill.hideM{display:none}
+    .ui{justify-content:flex-start}
+    #stage{position:fixed;inset:0}
+    .controls{position:fixed;left:0;right:0;bottom:0;margin:0;width:100vw;max-height:52svh;overflow-y:auto;-webkit-overflow-scrolling:touch;border-radius:18px 18px 0 0;border-left:none;border-right:none;border-bottom:none;padding:10px 12px calc(10px + env(safe-area-inset-bottom));box-shadow:0 -12px 40px rgba(0,0,0,.6)}
+    .controls.mini #sheetBody{display:none}
+    .controls.mini{max-height:none}
+    #sheetToggle{display:block;width:100%;background:none;border:none;color:var(--muted);font-size:12px;font-weight:800;letter-spacing:.1em;padding:2px 0 8px;cursor:pointer}
+    .row{gap:8px}
+    /* big touch transport row */
+    .transport{width:100%;display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:center}
+    .transport button{min-height:48px;font-size:15px;border-radius:14px}
+    #time{font-size:13px;text-align:right;min-width:0}
+    /* upload + demo full width */
+    .filelabel,#demoBtn{flex:1;min-height:48px;display:flex;align-items:center;justify-content:center;font-size:14px;text-align:center}
+    #drop{display:none}
+    label.ctl{flex:1 1 46%;min-width:46%;min-height:48px;font-size:13px;justify-content:space-between}
+    label.ctl input[type=range]{flex:1;min-width:60px;height:32px}
+    select{min-height:36px;font-size:14px}
+    .hint{display:none}
+    .meta{font-size:11px}
+    #status{font-size:11px;line-height:1.4}
+  }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv"></canvas></div>
+<div class="ui">
+  <header>
+    <div class="logo">⚡ <b>TESLA</b> COIL SYNTH LAB</div>
+    <div class="pill hideM">DRSSTC • polyphonic • square-wave resynthesis</div>
+    <div class="pill" id="filePill">no file loaded</div>
+    <div class="pill" id="notePill">—</div>
+  </header>
+
+  <div class="controls" id="controls">
+    <button id="sheetToggle" aria-label="Collapse panel">— SWIPE / TAP TO COLLAPSE —</button>
+    <div id="sheetBody">
+    <div class="row">
+      <label class="filelabel" for="file">⬆ Upload MP3 / WAV</label>
+      <input id="file" type="file" accept=".mp3,.wav,.ogg,.m4a,.flac,audio/*">
+      <div id="drop">drag & drop audio here</div>
+      <button id="demoBtn" title="Play built-in demo without uploading">▶ Demo song</button>
+      <div class="transport">
+        <button id="playBtn" class="primary" disabled>▶ Play Coils</button>
+        <button id="stopBtn" disabled>⏹ Stop</button>
+        <span id="time">00:00 / 00:00</span>
+      </div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <label class="ctl">Coils <select id="coilCount"><option value="1">1</option><option value="2">2</option><option value="3" selected>3</option><option value="4">4</option></select></label>
+      <label class="ctl">Volume <input id="vol" type="range" min="0" max="100" value="80" style="width:90px"> <b id="volV">80%</b></label>
+      <label class="ctl">Sensitivity <input id="sens" type="range" min="20" max="100" value="55" style="width:90px"> <b id="sensV">med</b></label>
+      <label class="ctl">Arc length <input id="arc" type="range" min="20" max="150" value="100" style="width:90px"> <b id="arcV">100%</b></label>
+      <label class="ctl"><input id="muteOrig" type="checkbox" checked disabled> 100% coil synth (no original audio)</label>
+    </div>
+    <div id="progressWrap"><div id="progress"></div></div>
+    <div class="meta"><span id="status">Upload a file → it will be transcribed to coil notes (square-wave pulse synthesis, not sample playback).</span></div>
+    <div class="hint">How it works: file is decoded → FFT pitch-tracker extracts up to <code>N</code> dominant notes every ~46 ms → each note drives one physical-modelled coil (harsh <code>square + spark-noise + waveshaper</code>). Original sound is <b>never</b> played back. For best results use melodic / bass-heavy music. Large files take a few seconds to transcribe.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+const $ = id => document.getElementById(id);
+const cv = $('cv'), ctx = cv.getContext('2d');
+let W=0,H=0,DPR=1;
+function resize(){ DPR=Math.min(2,window.devicePixelRatio||1); W=innerWidth; H=innerHeight; cv.width=W*DPR; cv.height=H*DPR; ctx.setTransform(DPR,0,0,DPR,0,0); }
+addEventListener('resize',resize); resize();
+
+// ---------- helpers ----------
+const NOTE_NAMES=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const midiName=m=>NOTE_NAMES[((m%12)+12)%12]+(Math.floor(m/12)-1);
+const midiFreq=m=>440*Math.pow(2,(m-69)/12);
+const fmtT=s=>{s=Math.max(0,Math.floor(s));return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');};
+
+// ---------- audio engine (coil synth only) ----------
+let AC=null, master=null, delaySend=null, coils=[];
+function ensureAudio(){
+  if(AC) return;
+  AC=new (window.AudioContext||window.webkitAudioContext)({latencyHint:'interactive'});
+  master=AC.createGain(); master.gain.value=($('vol').value/100)*0.9;
+  const comp=AC.createDynamicsCompressor();
+  comp.threshold.value=-14; comp.ratio.value=8;
+  master.connect(comp); comp.connect(AC.destination);
+  // tiny echo = big lab room
+  delaySend=AC.createGain(); delaySend.gain.value=0.22;
+  const dl=AC.createDelay(1); dl.delayTime.value=0.27;
+  const fb=AC.createGain(); fb.gain.value=0.35;
+  const lp=AC.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=3200;
+  delaySend.connect(dl); dl.connect(lp); lp.connect(fb); fb.connect(dl); lp.connect(master);
+}
+function waveshaperCurve(){
+  const n=1024,c=new Float32Array(n);
+  for(let i=0;i<n;i++){const x=i/(n-1)*2-1; c[i]=Math.tanh(3.2*x);} // harsh clip = DRSSTC
+  return c;
+}
+let SHAPER_CURVE=null, NOISE_BUF=null;
+function buildShared(){
+  SHAPER_CURVE=waveshaperCurve();
+  const len=AC.sampleRate*1.2, b=AC.createBuffer(1,len,AC.sampleRate), d=b.getChannelData(0);
+  for(let i=0;i<len;i++) d[i]=Math.random()*2-1;
+  NOISE_BUF=b;
+}
+function makeCoilVoice(){
+  const o1=AC.createOscillator(); o1.type='square'; o1.frequency.value=55;
+  const o2=AC.createOscillator(); o2.type='sawtooth'; o2.frequency.value=55.7; // slight detune = spark chorus
+  const g2=AC.createGain(); g2.gain.value=0.35;
+  const sh=AC.createWaveShaper(); sh.curve=SHAPER_CURVE; sh.oversample='2x';
+  const lp=AC.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=4500; lp.Q.value=2;
+  const vca=AC.createGain(); vca.gain.value=0;
+  // spark hiss gated by same envelope
+  const ns=AC.createBufferSource(); ns.buffer=NOISE_BUF; ns.loop=true; ns.playbackRate.value=0.9+Math.random()*0.3;
+  const bp=AC.createBiquadFilter(); bp.type='highpass'; bp.frequency.value=3800;
+  const ng=AC.createGain(); ng.gain.value=0;
+  o1.connect(sh); o2.connect(g2); g2.connect(sh); sh.connect(lp); lp.connect(vca); vca.connect(master); vca.connect(delaySend);
+  ns.connect(bp); bp.connect(ng); ng.connect(master);
+  o1.start(); o2.start(); ns.start();
+  return {o1,o2,lp,vca,ng,energy:0,target:0,freq:0,midi:-1};
+}
+function ensureCoils(n){
+  ensureAudio(); if(!SHAPER_CURVE) buildShared();
+  while(coils.length<n) coils.push(makeCoilVoice());
+  // extra voices -> silence (keep running)
+  coils.forEach((c,i)=>{ if(i>=n){c.target=0; try{c.vca.gain.setTargetAtTime(0,AC.currentTime,0.03);c.ng.gain.setTargetAtTime(0,AC.currentTime,0.03);}catch(e){}} });
+  return coils.slice(0,n);
+}
+function setCoilNote(v, midi, gain, t){
+  const f=midiFreq(midi);
+  v.midi=midi; v.freq=f;
+  v.o1.frequency.setTargetAtTime(f,t,0.008);
+  v.o2.frequency.setTargetAtTime(f*1.003+1.5,t,0.008);
+  v.lp.frequency.setTargetAtTime(Math.min(9000,1200+f*1.6),t,0.03);
+  const a=Math.min(1,gain)*0.5; // per-coil level, master sums
+  v.target=a;
+  v.vca.gain.setTargetAtTime(a,t,0.006); // fast attack =劈 crack
+  v.ng.gain.setTargetAtTime(a*0.35,t,0.01);
+}
+function silenceCoil(v,t){ v.midi=-1; v.target=0; v.vca.gain.setTargetAtTime(0,t,0.045); v.ng.gain.setTargetAtTime(0,t,0.03); }
+
+// ---------- FFT + transcription ----------
+function fftRealImag(re,im){
+  const n=re.length;
+  for(let i=1,j=0;i<n;i++){let b=n>>1;for(;j&b;b>>=1)j^=b;j^=b;if(i<j){let t=re[i];re[i]=re[j];re[j]=t;t=im[i];im[i]=im[j];im[j]=t;}}
+  for(let len=2;len<=n;len<<=1){
+    const ang=-2*Math.PI/len, wr=Math.cos(ang), wi=Math.sin(ang);
+    for(let i=0;i<n;i+=len){
+      let cwr=1,cwi=0;
+      for(let j=0;j<len/2;j++){
+        const ur=re[i+j],ui=im[i+j], vr=re[i+j+len/2]*cwr-im[i+j+len/2]*cwi, vi=re[i+j+len/2]*cwi+im[i+j+len/2]*cwr;
+        re[i+j]=ur+vr; im[i+j]=ui+vi; re[i+j+len/2]=ur-vr; im[i+j+len/2]=ui-vi;
+        const nwr=cwr*wr-cwi*wi; cwi=cwr*wi+cwi*wr; cwr=nwr;
+      }
+    }
+  }
+}
+function magAt(mags, sr, N, f){
+  const bin=f*N/sr, i0=Math.floor(bin), frac=bin-i0;
+  if(i0<1||i0+1>=mags.length) return 0;
+  return mags[i0]*(1-frac)+mags[i0+1]*frac;
+}
+
+async function transcribe(buffer, numCoils, sens, onProg){
+  const sr=buffer.sampleRate;
+  const ch0=buffer.getChannelData(0);
+  const ch1=buffer.numberOfChannels>1?buffer.getChannelData(1):null;
+  const len=ch0.length;
+  const mono=new Float32Array(len);
+  for(let i=0;i<len;i++) mono[i]=ch1?(ch0[i]+ch1[i])*0.5:ch0[i];
+
+  const N=4096, HOP=2048;
+  const frames=Math.max(1,Math.floor((len-N)/HOP));
+  const re=new Float32Array(N), im=new Float32Array(N);
+  const hann=new Float32Array(N);
+  for(let i=0;i<N;i++) hann[i]=0.5*(1-Math.cos(2*Math.PI*i/(N-1)));
+  const out=new Array(frames);
+  const LOW_MIDI=26, HIGH_MIDI=91; // E1 .. G6 — coil-friendly range
+  const lastAssigned=new Array(numCoils).fill(-1);
+  const thresh = 0.28 - (sens/100)*0.20; // sens 20..100 -> thresh .24..08
+
+  for(let fIdx=0;fIdx<frames;fIdx++){
+    const off=fIdx*HOP;
+    let rms=0;
+    for(let i=0;i<N;i++){const v=mono[off+i]*hann[i];re[i]=v;im[i]=0;rms+=v*v;}
+    rms=Math.sqrt(rms/N);
+    if(rms<0.012){ out[fIdx]={t:off/sr,notes:[]}; }
+    else{
+      fftRealImag(re,im);
+      const half=N/2, mags=new Float32Array(half);
+      for(let k=0;k<half;k++) mags[k]=Math.sqrt(re[k]*re[k]+im[k]*im[k])/(N/2);
+      // harmonic-weighted pitch scores
+      const cands=[];
+      for(let m=LOW_MIDI;m<=HIGH_MIDI;m++){
+        const f0=midiFreq(m);
+        let s=0,w=0;
+        for(let h=1;h<=5;h++){
+          const fh=f0*h; if(fh>sr/2-50) break;
+          const hw=1/Math.pow(h,0.9);
+          s+=magAt(mags,sr,N,fh)*hw; w+=hw;
+        }
+        s/=w;
+        // slight emphasis to mid where coils sing + penalize extreme lows (muddy)
+        cands.push({m,s});
+      }
+      let mx=1e-9; for(const c of cands) mx=Math.max(mx,c.s);
+      cands.sort((a,b)=>b.s-a.s);
+      const picked=[];
+      for(const c of cands){
+        if(c.s<mx*thresh) break;
+        if(picked.length>=numCoils) break;
+        if(picked.some(p=>Math.abs(p.m-c.m)<=1)) continue; // suppress leakage neighbours
+        picked.push(c);
+      }
+      // voice-continuity assignment: keep coils from jumping
+      const slots=new Array(numCoils).fill(null);
+      const used=new Array(numCoils).fill(false);
+      // order picked by score, assign nearest free coil
+      const order=[...picked].sort((a,b)=>b.s-a.s);
+      for(const p of order){
+        let best=-1,bd=1e9;
+        for(let c=0;c<numCoils;c++){ if(used[c])continue; const d=lastAssigned[c]<0?0:Math.abs(p.m-lastAssigned[c]); if(d<bd){bd=d;best=c;} }
+        if(best>=0){ slots[best]={midi:p.m,gain:Math.min(1,0.25+0.75*(p.s/mx))*(0.4+0.6*Math.min(1,rms*8))}; used[best]=true; }
+      }
+      for(let c=0;c<numCoils;c++){ lastAssigned[c]=slots[c]?slots[c].midi:(Math.random()<0.04?-1:lastAssigned[c]); if(!slots[c]&&Math.random()<0.02) lastAssigned[c]=-1; }
+      const notes=[];
+      for(let c=0;c<numCoils;c++) if(slots[c]) notes.push({coil:c,midi:slots[c].midi,gain:slots[c].gain});
+      out[fIdx]={t:off/sr,notes};
+    }
+    if(fIdx%150===0){ onProg&&onProg(fIdx/frames); await new Promise(r=>setTimeout(r,0)); }
+  }
+  // light smoothing: kill 1-frame blips (flicker -> buzz)
+  for(let c=0;c<numCoils;c++){
+    for(let i=1;i<frames-1;i++){
+      const has=h=>out[h].notes.some(n=>n.coil===c);
+      if(!has(i)&&has(i-1)&&has(i+1)){
+        const a=out[i-1].notes.find(n=>n.coil===c), b=out[i+1].notes.find(n=>n.coil===c);
+        if(a&&b&&Math.abs(a.midi-b.midi)<=2) out[i].notes.push({coil:c,midi:a.midi,gain:(a.gain+b.gain)/2});
+      }
+    }
+  }
+  onProg&&onProg(1);
+  return {frames:out, hop:HOP/sr, duration:buffer.duration};
+}
+
+// ---------- state / transport ----------
+let song=null; // {frames,hop,duration,name}
+let playing=false, startCtxTime=0, startOffset=0, schedTimer=null, curVoices=[];
+let particles=[];
+
+function setStatus(s){$('status').textContent=s;}
+function setProg(p){$('progressWrap').style.display=p==null?'none':'block'; if(p!=null)$('progress').style.width=(p*100).toFixed(1)+'%';}
+
+async function loadFile(file){
+  ensureAudio(); await AC.resume();
+  setProg(0); setStatus('Decoding '+file.name+' …');
+  $('playBtn').disabled=true;
+  try{
+    const ab=await file.arrayBuffer();
+    const buf=await AC.decodeAudioData(ab.slice(0));
+    const n=parseInt($('coilCount').value,10), sens=parseInt($('sens').value,10);
+    setStatus('Transcribing to '+n+' coils (FFT pitch tracking) …');
+    song=await transcribe(buf,n,sens,p=>setProg(p*0.95));
+    song.name=file.name;
+    setProg(null);
+    startOffset=0; updateFilePill(); updateTime();
+    $('playBtn').disabled=false; $('stopBtn').disabled=false;
+    setStatus('Ready: '+song.frames.length+' frames, '+fmtT(song.duration)+' — press Play Coils. Pure synthesis, original sample muted.');
+  }catch(e){ console.error(e); setProg(null); setStatus('Could not decode that file. Try MP3 or WAV.'); }
+}
+function loadDemo(){
+  ensureAudio(); AC.resume();
+  const n=parseInt($('coilCount').value,10);
+  // A-minor arp + bass that shows off polyphony — fully synthetic "transcription"
+  const seq=[57,60,64,69,72,69,64,60, 53,57,60,64,69,64,60,57, 55,59,62,67,71,67,62,59, 57,60,64,69,76,72,69,64];
+  const step=0.21, frames=[]; let t=0;
+  for(let rep=0;rep<4;rep++) for(let i=0;i<seq.length;i++){
+    const fcount=Math.round(step/(2048/44100));
+    for(let k=0;k<fcount;k++){
+      const notes=[];
+      for(let c=0;c<n;c++){
+        const idx=(i+c*3)%seq.length;
+        notes.push({coil:c,midi:seq[idx]- (c===0?12:0),gain:c===0?0.9:0.55});
+      }
+      frames.push({t,notes:rep===3&&i>seq.length-6?notes.slice(0,Math.max(1,n-1)):notes}); t+=2048/44100;
+    }
+  }
+  song={frames,hop:2048/44100,duration:t,name:'demo — A minor coil etude'};
+  startOffset=0; updateFilePill(); updateTime();
+  $('playBtn').disabled=false; $('stopBtn').disabled=false;
+  setStatus('Demo loaded — press Play Coils.');
+}
+function updateFilePill(){ $('filePill').textContent=song?('♪ '+(song.name||'').slice(0,42)+' • '+fmtT(song.duration)):'no file loaded'; }
+function updateTime(){ const cur=playing?(AC.currentTime-startCtxTime+startOffset):startOffset; $('time').textContent=fmtT(cur)+' / '+fmtT(song?song.duration:0); }
+
+function frameAt(time){
+  if(!song) return null;
+  const idx=Math.floor(time/song.hop);
+  if(idx<0||idx>=song.frames.length) return null;
+  return song.frames[idx];
+}
+function play(){
+  if(!song||playing) return;
+  ensureAudio(); AC.resume();
+  const n=parseInt($('coilCount').value,10);
+  curVoices=ensureCoils(n);
+  // if coil count changed since transcription, re-map greedily
+  playing=true; startCtxTime=AC.currentTime+0.08; // startOffset already set (resume support)
+  $('playBtn').textContent='⏸ Pause'; $('playBtn').disabled=false;
+  schedTimer=setInterval(schedule,40);
+  schedule();
+}
+function schedule(){
+  if(!playing) return;
+  const now=AC.currentTime;
+  const t=(now-startCtxTime)+startOffset;
+  if(t>=song.duration){ stop(true); return; }
+  const fr=frameAt(t);
+  const n=curVoices.length;
+  const want=new Array(n).fill(null);
+  if(fr) for(const nn of fr.notes) if(nn.coil<n) want[nn.coil]=nn;
+  for(let c=0;c<n;c++){
+    const v=curVoices[c], w=want[c];
+    // smooth visual energy
+    if(w) setCoilNote(v,w.midi,w.gain,now);
+    else silenceCoil(v,now);
+  }
+  updateTime();
+  // note pill
+  if(fr&&fr.notes.length){ const s=fr.notes.slice().sort((a,b)=>b.gain-a.gain).map(x=>midiName(x.midi)).join('  '); $('notePill').textContent='⚡ '+s; }
+  else $('notePill').textContent='— idle —';
+}
+function pause(){
+  if(!playing) return;
+  startOffset=(AC.currentTime-startCtxTime)+startOffset;
+  playing=false; clearInterval(schedTimer);
+  const t=AC.currentTime; curVoices.forEach(v=>silenceCoil(v,t));
+  $('playBtn').textContent='▶ Play Coils'; updateTime(); $('notePill').textContent='— paused —';
+}
+function stop(ended){
+  if(playing){clearInterval(schedTimer);playing=false;}
+  const t=AC?AC.currentTime:0; if(AC) curVoices.forEach(v=>silenceCoil(v,t));
+  startOffset=ended?(song?song.duration:0):0;
+  if(ended&&song) startOffset=0;
+  if($('playBtn')) $('playBtn').textContent='▶ Play Coils';
+  updateTime(); if(ended) setStatus('Finished — press Play to run it again.');
+}
+
+// ---------- visuals ----------
+const isCoarse=matchMedia&&matchMedia('(pointer:coarse)').matches;
+function horizonY(){ return H*(W<620?0.60:0.78); } // keep coils above bottom sheet on phones
+function groundY(){ return horizonY(); }
+function coilScale(n){
+  if(W<620) return Math.min(0.95,Math.max(0.40,W/(300*n+120))); // shrink to fit narrow screens
+  return Math.min(1.15,Math.max(0.72,W/(420*n+260)));
+}
+function coilLayout(n){
+  const xs=[];
+  const mid=W/2, spread=W<620?W*0.92:Math.min(W*0.72, 260*n);
+  for(let i=0;i<n;i++) xs.push(n===1?mid:mid-spread/2+spread*i/(n-1));
+  return xs;
+}
+function boltPath(x0,y0,len,ang,seg){
+  const pts=[[x0,y0]];
+  let x=x0,y=y0,a=ang;
+  for(let i=0;i<seg;i++){
+    const s=len/seg;
+    a+=(Math.random()-0.5)*0.7; // narrower wander = calmer channel
+    x+=Math.cos(a)*s; y+=Math.sin(a)*s;
+    pts.push([x,y]);
+    if(Math.random()<0.12&&pts.length>2) return {main:pts,branch:boltPath(x,y,len*0.4,a+(Math.random()<0.5?0.9:-0.9),3)};
+  }
+  return {main:pts,branch:null};
+}
+// Persistent arc channels: each coil holds one strike path for 2-4 pulses,
+// then re-strikes the SAME compass heading. Different pitch = different
+// air channel: heading + length + tint are derived from the MIDI note so the
+// same freq always rejoins its own channel and a new freq visibly jumps.
+const arcStates=[];
+function getArcState(i){
+  if(!arcStates[i]) arcStates[i]={bolts:[],pulsesLeft:0,energySm:0,lenSm:120,midi:-2,_nextPulse:0,chanByMidi:{},tint:{outer:'rgba(140,60,255,0.75)',core:'rgba(220,255,255,0.95)'}};
+  return arcStates[i];
+}
+// deterministic per-note air channel: low notes lean left, high notes lean right
+function channelFor(st,midi,coilIdx){
+  if(st.chanByMidi[midi]) return st.chanByMidi[midi];
+  const lo=26, hi=91;
+  const f=(Math.min(hi,Math.max(lo,midi))-lo)/(hi-lo); // 0..1
+  const perCoil=(coilIdx-1)*0.12; // spread coils apart so same note differs per tower
+  const baseAng=-Math.PI/2+(f-0.5)*1.7+perCoil+(Math.random()-0.5)*0.12;
+  const lenMul=0.8+f*0.65; // high notes reach slightly farther
+  // tint: low = violet, high = ice cyan
+  const outer=`rgba(${Math.round(140-60*f)},${Math.round(60+60*f)},255,0.75)`;
+  const ch={baseAng,lenMul,outer};
+  st.chanByMidi[midi]=ch;
+  // bound memory
+  const keys=Object.keys(st.chanByMidi);
+  if(keys.length>24) delete st.chanByMidi[keys[0]];
+  return ch;
+}
+function strokeBolt(pts,color,width,glow){
+  ctx.save(); ctx.strokeStyle=color; ctx.lineWidth=width; ctx.lineJoin='round'; ctx.lineCap='round';
+  ctx.shadowColor=color; ctx.shadowBlur=glow;
+  ctx.beginPath(); ctx.moveTo(pts[0][0],pts[0][1]);
+  for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i][0],pts[i][1]);
+  ctx.stroke(); ctx.restore();
+}
+function drawArc(x,y,energy,freq,arcScale,coilIdx,time){
+  const st=getArcState(coilIdx==null?0:coilIdx);
+  // smooth energy + length so arcs breathe instead of jumping
+  st.energySm+=(energy-st.energySm)*0.2;
+  if(st.energySm<0.03){ st.bolts=[]; st.pulsesLeft=0; return; }
+  const v=(typeof curVoices!=='undefined'&&curVoices[coilIdx])||null;
+  const curMidi=v?v.midi:-1;
+  const targetLen=(60+Math.min(1,st.energySm)*210+(freq/1200)*60)*arcScale;
+  st.lenSm+=(targetLen-st.lenSm)*0.25;
+
+  // one "pulse" ≈ 70–120 ms: re-strike the SAME channel with tiny jitter
+  if(time>=st._nextPulse){
+    st._nextPulse=time+0.07+Math.random()*0.05;
+    // jitter existing path a few px — looks like re-strike, not a new bolt
+    for(const b of st.bolts){
+      for(let k=1;k<b.main.length;k++){ b.main[k][0]+=(Math.random()-0.5)*3; b.main[k][1]+=(Math.random()-0.5)*3; }
+      if(b.branch) for(let k=1;k<b.branch.main.length;k++){ b.branch.main[k][0]+=(Math.random()-0.5)*2.5; b.branch.main[k][1]+=(Math.random()-0.5)*2.5; }
+    }
+    st.pulsesLeft--;
+    const noteChanged=st.midi!==curMidi;
+    if(st.pulsesLeft<=0||noteChanged||st.bolts.length===0){
+      // same freq → same heading (fresh jittered path); new freq → its own heading
+      st.pulsesLeft=2+Math.floor(Math.random()*3);
+      st.midi=curMidi;
+      const ch=channelFor(st,curMidi,coilIdx||0);
+      st.tint={outer:ch.outer,core:'rgba(220,255,255,0.95)'};
+      const nBolts=1+Math.round(Math.min(1,st.energySm)*2); // 1–3 stable leaders
+      st.bolts=[];
+      for(let b=0;b<nBolts;b++){
+        const ang=ch.baseAng+(b-(nBolts-1)/2)*0.28+(Math.random()-0.5)*0.12;
+        const tree=boltPath(x,y,st.lenSm*ch.lenMul*(0.9+Math.random()*0.2),ang,9+Math.floor(Math.random()*3));
+        st.bolts.push(tree);
+        if(noteChanged){
+          const tip=tree.main[tree.main.length-1];
+          for(let k=0;k<2;k++) particles.push({x:tip[0],y:tip[1],vx:(Math.random()-0.5)*160,vy:(Math.random()-0.5)*160-40,life:0.35+Math.random()*0.35,t:0});
+        }
+      }
+    }
+  }
+  // brightness breathes gently with the pulse clock — no per-frame strobing
+  const sincePulse=Math.max(0,(st._nextPulse-time));
+  const bright=0.65+0.35*Math.min(1,sincePulse/0.1);
+  for(const tree of st.bolts){
+    // re-anchor base to toroid tip (coils don't move, but layout can on resize)
+    const dx=x-tree.main[0][0], dy=y-tree.main[0][1];
+    if(Math.abs(dx)>0.5||Math.abs(dy)>0.5) for(const p of tree.main){p[0]+=dx;p[1]+=dy;}
+    if(tree.branch&&tree.main.length>2){ tree.branch.main[0][0]=tree.main[2][0]; tree.branch.main[0][1]=tree.main[2][1]; }
+    ctx.save(); ctx.globalAlpha=bright;
+    strokeBolt(tree.main,st.tint.outer||'rgba(140,60,255,0.75)',3.2,18);
+    strokeBolt(tree.main,st.tint.core||'rgba(220,255,255,0.95)',1.2,12);
+    if(tree.branch){ strokeBolt(tree.branch.main,'rgba(125,249,255,0.8)',1.6,10); }
+    ctx.restore();
+  }
+}
+function drawCoil(x,baseY,s,voice,arcScale,time,coilIdx){
+  const e = voice?Math.min(1,(voice.vca?voice.vca.gain.value*2.2:0)+ (voice.target||0)*0.35):0;
+  const energy = drawCoil._sm(drawCoil._k=(drawCoil._k||{}) , x, e);
+  // ground glow
+  const g=ctx.createRadialGradient(x,baseY,10,x,baseY,190*s);
+  g.addColorStop(0,`rgba(125,249,255,${0.10+energy*0.35})`); g.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=g; ctx.fillRect(x-200*s,baseY-140*s,400*s,170*s);
+  // base box
+  ctx.save();
+  ctx.fillStyle='#101a30'; ctx.strokeStyle='#2c4472'; ctx.lineWidth=2;
+  const bw=150*s,bh=54*s;
+  roundRect(x-bw/2,baseY-bh,bw,bh,8); ctx.fill(); ctx.stroke();
+  ctx.fillStyle='#0a1226'; ctx.font=`${11*s}px monospace`; ctx.textAlign='center';
+  ctx.fillStyle= energy>0.1?'#7df9ff':'#42567e';
+  ctx.fillText(voice&&voice.midi>0?('♪ '+midiName(voice.midi)+'  '+Math.round(voice.freq)+'Hz'):'— standby —', x, baseY-bh/2+4);
+  // primary (few thick turns)
+  ctx.strokeStyle='#3b5a9a'; ctx.lineWidth=4*s;
+  for(let i=0;i<4;i++){ ctx.beginPath(); ctx.ellipse(x,baseY-bh-8-i*9*s, (52-i*7)*s, 10*s,0,0,Math.PI*2); ctx.stroke(); }
+  // secondary tower
+  const tw=54*s, th=190*s, ty=baseY-bh-36*s-th;
+  const grad=ctx.createLinearGradient(x-tw/2,0,x+tw/2,0);
+  grad.addColorStop(0,'#1a2745'); grad.addColorStop(0.5,'#4a6db3'); grad.addColorStop(1,'#141f3a');
+  ctx.fillStyle=grad; roundRect(x-tw/2,ty,tw,th,10); ctx.fill();
+  ctx.strokeStyle='#7df9ff55'; ctx.lineWidth=1;
+  for(let y=ty+6;y<ty+th-4;y+=5){ ctx.beginPath(); ctx.moveTo(x-tw/2+3,y); ctx.lineTo(x+tw/2-3,y); ctx.stroke(); }
+  // toroid
+  ctx.save();
+  ctx.shadowColor=`rgba(125,249,255,${0.3+energy*0.7})`; ctx.shadowBlur=20+energy*46;
+  ctx.fillStyle='#0d152b'; ctx.strokeStyle='#7df9ff'; ctx.lineWidth=2.4;
+  ctx.beginPath(); ctx.ellipse(x,ty-8*s,66*s,20*s,0,0,Math.PI*2); ctx.fill(); ctx.stroke();
+  ctx.restore();
+  // breakout point
+  const tipX=x, tipY=ty-28*s;
+  ctx.fillStyle='#dffcff'; ctx.beginPath(); ctx.arc(tipX,tipY,2.4,0,Math.PI*2); ctx.fill();
+  // arcs — persistent channel per coil (see drawArc)
+  if(voice&&voice.midi>0) drawArc(tipX,tipY-4,energy,voice.freq||440,arcScale,coilIdx,time);
+  // corona flicker light on toroid
+  if(energy>0.05){ ctx.save(); ctx.globalAlpha=Math.min(1,energy)*(0.5+Math.random()*0.5); ctx.fillStyle='#cfffff'; ctx.beginPath(); ctx.ellipse(x,ty-8*s,66*s,20*s,0,0,Math.PI*2); ctx.fill(); ctx.restore(); }
+}
+drawCoil._sm=function(store,x,e){ const k='e'+Math.round(x); const prev=(k in store)?store[k]:e; const v=prev+(e-prev)*0.18; store[k]=v; return v; };
+function roundRect(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+
+function drawBG(t){
+  // floor grid
+  ctx.save(); ctx.strokeStyle='#14244a66'; ctx.lineWidth=1;
+  const horizon=horizonY();
+  ctx.fillStyle='#02040a'; ctx.fillRect(0,horizon,W,H-horizon);
+  for(let i=0;i<24;i++){ const y=horizon+Math.pow(i/24,1.8)*(H-horizon); ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+  for(let i=-14;i<=14;i++){ ctx.beginPath(); ctx.moveTo(W/2+i*70,horizon); ctx.lineTo(W/2+i*260,H); ctx.stroke(); }
+  ctx.strokeStyle='#1e3a6e'; ctx.beginPath(); ctx.moveTo(0,horizon); ctx.lineTo(W,horizon); ctx.stroke();
+  ctx.restore();
+  // floating dust
+  ctx.save(); ctx.fillStyle='#7df9ff22';
+  for(let i=0;i<40;i++){ const x=(i*197.3+t*12)%W, y=(i*131.7)%(H*0.7); ctx.fillRect(x,y,1.6,1.6); }
+  ctx.restore();
+}
+function loop(tms){
+  requestAnimationFrame(loop);
+  const t=tms/1000;
+  ctx.clearRect(0,0,W,H);
+  drawBG(t);
+  const n=parseInt($('coilCount').value,10);
+  const xs=coilLayout(n);
+  const arcScale=parseInt($('arc').value,10)/100;
+  const baseY=groundY();
+  // title glow pulse
+  for(let i=0;i<n;i++){
+    const v=(playing||curVoices[i])?curVoices[i]:null;
+    const s=coilScale(n);
+    drawCoil(xs[i],baseY,s,v,arcScale,t,i);
+  }
+  // particles
+  ctx.save();
+  for(let i=particles.length-1;i>=0;i--){
+    const p=particles[i]; p.t+=1/60; if(p.t>p.life){particles.splice(i,1);continue;}
+    p.x+=p.vx/60; p.y+=p.vy/60; p.vy+=420/60;
+    ctx.globalAlpha=1-p.t/p.life; ctx.fillStyle='#bffcff';
+    ctx.shadowColor='#7df9ff'; ctx.shadowBlur=8;
+    ctx.fillRect(p.x,p.y,2,2);
+  }
+  ctx.restore();
+  if(particles.length>900) particles.splice(0,particles.length-900);
+}
+requestAnimationFrame(loop);
+
+// ---------- wiring (desktop + phone) ----------
+if('ontouchstart' in window&&$('drop')) $('drop').style.display='none'; // no drag-drop on phones
+const sheet=$('controls'), sheetBtn=$('sheetToggle');
+if(sheetBtn) sheetBtn.addEventListener('click',()=>{
+  sheet.classList.toggle('mini');
+  sheetBtn.textContent=sheet.classList.contains('mini')?'— TAP TO EXPAND —':'— SWIPE / TAP TO COLLAPSE —';
+  setTimeout(resize,50);
+});
+// iOS/Safari: unlock audio on first touch
+const unlock=()=>{ if(AC&&AC.state==='suspended') AC.resume(); };
+document.addEventListener('touchend',unlock,{passive:true});
+document.addEventListener('touchstart',unlock,{passive:true});
+if(window.visualViewport) visualViewport.addEventListener('resize',resize);
+addEventListener('orientationchange',()=>setTimeout(resize,200));
+$('file').addEventListener('change',e=>{ if(e.target.files[0]){ loadFile(e.target.files[0]); if(W<620) sheet.classList.add('mini'); } });
+const drop=$('drop');
+['dragover','dragenter'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('over');}));
+['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('over');}));
+drop.addEventListener('drop',e=>{ const f=e.dataTransfer.files&&e.dataTransfer.files[0]; if(f) loadFile(f); });
+$('demoBtn').addEventListener('click',loadDemo);
+$('playBtn').addEventListener('click',()=>{ if(!song) return; if(playing) pause(); else play(); });
+$('stopBtn').addEventListener('click',()=>stop(false));
+$('vol').addEventListener('input',e=>{ $('volV').textContent=e.target.value+'%'; if(master&&AC) master.gain.setTargetAtTime((e.target.value/100)*0.9,AC.currentTime,0.02); });
+$('sens').addEventListener('input',e=>{ const v=+e.target.value; $('sensV').textContent=v<40?'low':v<70?'med':'high'; });
+$('arc').addEventListener('input',e=>{ $('arcV').textContent=e.target.value+'%'; });
+$('coilCount').addEventListener('change',async ()=>{
+  // live re-transcribe if song from file? keep simple: only affects synth voices + visuals;
+  // for file songs, next Play will re-map existing frames to new coil count
+  if(song&&song.frames&&song.name&&!song.name.startsWith('demo')&&playing){ pause(); setStatus('Coil count changed — press Play (frames re-mapped).'); }
+});
+document.addEventListener('keydown',e=>{ if(e.code==='Space'&&song){e.preventDefault(); playing?pause():play();} });
+})();
+</script>
+</body>
+</html>
